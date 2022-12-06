@@ -2,15 +2,17 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <pthread.h>
+#include <string.h>
+#include <time.h>
 
 #define ENCRYPTION 1
 #define DECRYPTION 0
-#define BUFFER_SIZE 4096
-#define THREAD_COUNT 4
+#define ENCRYPTION_MAX_SIZE 1024
+#define THREAD_COUNT 6
 
 //holds a chunk of text to encrypt/decrypt and a position to reassemble the text.
 typedef struct Task {
-	char* text;
+	char text[ENCRYPTION_MAX_SIZE + 1];
 	size_t position;
 } Task;
 
@@ -21,12 +23,20 @@ typedef struct Thread_args {
 } Thread_args;
 
 
-//Create our queue.
+//Create our queue & array to hold tasks.
 Task task_queue[256];
+Task task_array[256];
 int task_count = 0;
+int array_current_size = 0;
+
+//Holding arguments
+int key;
+char* flag_argument;
+int work_mode;
 
 //Create a lock for critical section.
 pthread_mutex_t mutex_queue;
+pthread_cond_t cond_queue;
 /**
  * @brief Consumer
  * consumes a task from the queue(thread safe).
@@ -43,12 +53,13 @@ void* startThread(void* args){
 	int key = thread_args->key;
 	int mode = thread_args->mode;
 
+	//Run in loop and check for tasks.
 	while(1){
+
 		Task task;
 		int found = 0;
 
 		pthread_mutex_lock(&mutex_queue);
-		//Critial section
 		if(task_count > 0){
 			found = 1;
 			task = task_queue[0];
@@ -59,14 +70,29 @@ void* startThread(void* args){
 			task_count--;
 		}
 		pthread_mutex_unlock(&mutex_queue);
+		
+		//No tasks were found, finish the job.
+		if(found == 0){
+			return NULL;
+		}
 
 		//Check working mode.
 		if(mode == ENCRYPTION && found == 1){
 			encrypt(task.text ,key);
+			
+			//Add task to array.
+			pthread_mutex_lock(&mutex_queue);
+			task_array[array_current_size++] = task;
+			pthread_mutex_unlock(&mutex_queue);
 		}
 
 		if(mode == DECRYPTION && found == 1){
-			encrypt(task.text ,key);
+			decrypt(task.text ,key);
+
+			//Add task to array.
+			pthread_mutex_lock(&mutex_queue);
+			task_array[array_current_size++] = task;
+			pthread_mutex_unlock(&mutex_queue);
 		}
 	}
 }
@@ -76,51 +102,20 @@ void* startThread(void* args){
  * 
  * @param task 
  */
-void addTask(Task task){
+void addTask(Task* task){
+
 	pthread_mutex_lock(&mutex_queue);
-	task_queue[task_count] = task;
+	task_queue[task_count] = *task;
 	task_count++;
 	pthread_mutex_unlock(&mutex_queue);
+
 }
+
 /**
- * @brief The function recieves 2 cmd arguments, 
- * first argument is the key an integer.
+ * @brief Check cmd args
  * 
- * second one is the flag:
- * -e for encryption
- * -d for decryption
- * 
- * example:
- * coder key -e < my_original_file > encripted_file
- * coder key -d < my_decripter_file > my_original_file
- * 
- * @param argc 
- * @param argv 
- * @return int 
  */
-int main(int argc, char *argv[])
-{
-	pthread_t th[THREAD_COUNT];
-	Thread_args thread_args;
-
-	//Holding arguments
-	int key;
-	char* flag_argument;
-	int work_mode;
-	
-	//File variables
-	char* file_content;
-	size_t file_len;
-	size_t file_size = BUFFER_SIZE;
-	file_content = (char *)malloc(BUFFER_SIZE * sizeof(char));
-
-	if( file_content == NULL){
-        perror("Unable to allocate buffer");
-        exit(1);
-    }
-
-	//Create space for content.
-	char *content = malloc(sizeof(char) * BUFFER_SIZE);
+void get_set_args(int argc, char * const argv[]){
 
 	//Check valid number of arguments.
 	if( argc != 3){
@@ -155,48 +150,85 @@ int main(int argc, char *argv[])
 			exit(1);
 		}
 	}
+}
+
+//task comparator for sorting
+int cmp( const void *a, const void *b )
+{
+    const Task *left  = (Task *)a;
+    const Task *right = (Task *)b;
+
+    return ( left->position < right->position ) - ( right->position < left->position );  
+}
+/**
+ * @brief The function recieves 2 cmd arguments, 
+ * first argument is the key an integer.
+ * 
+ * second one is the flag:
+ * -e for encryption
+ * -d for decryption
+ * 
+ * example:
+ * coder key -e < my_original_file > encripted_file
+ * coder key -d < my_decripter_file > my_original_file
+ * 
+ * @param argc 
+ * @param argv 
+ * @return int 
+ */
+int main(int argc, char *argv[])
+{
+
+	pthread_t th[THREAD_COUNT];
+	Thread_args thread_args;
+
+	get_set_args(argc, argv);
 
 	//set thread arguments.
 	thread_args.mode = work_mode;
 	thread_args.key = key;
 
-	//so far key is valid and flags are valid.
-	file_len = getline(&file_content, &file_size, stdin);
+	//init mutex.
 	pthread_mutex_init(&mutex_queue, NULL);
-	int i;
 
-	//init all threads.
+	int i;
+	char buffer[ENCRYPTION_MAX_SIZE+1];
+	size_t pos = 0;
+
+	while( fgets(buffer,1025, stdin) != NULL){
+
+		Task t = {
+			.text = "",
+			.position = pos++
+		};
+
+		//Partition file content
+		strncpy( t.text, buffer, strlen(buffer) );
+		addTask(&t);
+	}
+
+	//init & start all threads.
 	for(i = 0; i < THREAD_COUNT; i++){
 		if(pthread_create(&th[i], NULL, &startThread, &thread_args) != 0){
 			perror("Failed to initialize threads");
 		}
 	}
-
-	//add tasks to the queue.
-	for(i = 0; i < file_len; i++){
-		Task t = {
-			.text = file_content[i],
-			.position = i
-		};
-		
-		addTask(t);
-	}
-
+	
 	//join all threads.
 	for(i = 0; i < THREAD_COUNT; i++){
 		if(pthread_join(th[i], NULL) != 0){
 			perror("Failed to join the thread");
 		}
 	}
+	pthread_mutex_destroy(&mutex_queue);
 
-	char data[] = "my text to encrypt";
-	key = 12;
+	//Sort the array.
+	qsort( task_array, array_current_size, sizeof( Task ), cmp );
 
-	encrypt(data,key);
-	printf("encripted data: %s\n",data);
-
-	decrypt(data,key);
-	printf("decripted data: %s\n",data);
+	//concat all array
+	for(i=0; i < array_current_size; i++){
+		printf("%s", task_array[i].text);
+	}
 
 	return 0;
 }
