@@ -195,7 +195,7 @@ int main(int argc, char *argv[])
 	char buffer[ENCRYPTION_MAX_SIZE+1];
 	size_t pos = 0;
 
-	while( fgets(buffer,1025, stdin) != NULL){
+	while( fgets(buffer,1024, stdin) != NULL){
 
 		Task t = {
 			.text = "",
